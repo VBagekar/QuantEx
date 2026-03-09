@@ -110,6 +110,24 @@ UNIT_MAP = {
     "gb": ("gigabyte", "data"),
     "tb": ("terabyte", "data"),
     "mb": ("megabyte", "data"),
+
+    # Sports
+    "run": ("run", "sports"),
+    "runs": ("run", "sports"),
+    "goal": ("goal", "sports"),
+    "goals": ("goal", "sports"),
+    "point": ("point", "sports"),
+    "points": ("point", "sports"),
+    "wicket": ("wicket", "sports"),
+    "wickets": ("wicket", "sports"),
+
+    # General count
+    "neuron": ("neuron", "count"),
+    "neurons": ("neuron", "count"),
+    "vehicle": ("vehicle", "count"),
+    "vehicles": ("vehicle", "count"),
+    "unit": ("unit", "count"),
+    "units": ("unit", "count"),
 }
 
 # Currency symbols that appear BEFORE the number (e.g., $3.7 trillion, ₹500)
@@ -144,7 +162,8 @@ QUANTITY_PATTERN = re.compile(
     r"""
     (?P<currency>[$₹€£])?               # optional currency symbol
     (?P<number>
-        \d{1,3}(?:,\d{3})*             # integer, possibly comma-formatted
+        \d{1,3}(?:,\d{3})+            # comma-formatted: 1,400,000
+        |\d+                           # OR plain integer of any length: 8849
         (?:\.\d+)?                     # optional decimal
     )
     (?:                                 # optional unit block

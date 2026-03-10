@@ -1,262 +1,236 @@
 """
 quantity_detector.py
 
-Detects and normalizes quantity expressions from raw text.
+Two-phase quantity detection:
 
-A "quantity" is any numeric expression with an optional unit.
-Examples: "1.4 billion", "$3.7 trillion", "828 meters", "85 percent"
+Phase 1 — Regex: finds numeric values and KNOWN units (meter, kg, percent, $)
+          from units.json (kept only for normalized forms + currency symbols)
 
-Each detected quantity is returned as a QuantitySpan dataclass containing:
-  - value       : the numeric value as a float
-  - unit        : normalized unit string (e.g., "meter", "kilogram")
-  - unit_type   : category of unit (e.g., "length", "currency", "count")
-  - raw_text    : the original matched string from the sentence
-  - char_start  : character index where the match starts (used later for linking)
-  - char_end    : character index where the match ends
+Phase 2 — spaCy nummod: for ANY number, find the noun it modifies via the
+          dependency tree. This auto-discovers domain-specific units like
+          "runs", "neurons", "vehicles" WITHOUT manual addition.
+
+          "183 runs" → runs (nummod → 183) → unit = "run"
+          "86 billion neurons" → neurons (nummod → billion → 86) → unit = "neuron"
+
+This means units.json is now only needed for:
+  - Normalization: "metres" → "meter"
+  - Currency symbols: $ → dollar
+  - Scale words: million, billion (these modify nouns, not standalone units)
 """
 
 import re
+import json
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
+import spacy
 
 
 # ─────────────────────────────────────────────
-# 1. DATA CLASS — What a detected quantity looks like
+# 1. DATA CLASS
 # ─────────────────────────────────────────────
 
 @dataclass
 class QuantitySpan:
     value: float
-    unit: Optional[str]       # e.g., "meter", "billion", "percent"
-    unit_type: Optional[str]  # e.g., "length", "count", "currency"
-    raw_text: str             # e.g., "1.4 billion"
-    char_start: int           # position in original sentence
+    unit: Optional[str]
+    unit_type: Optional[str]
+    raw_text: str
+    char_start: int
     char_end: int
 
 
 # ─────────────────────────────────────────────
-# 2. UNIT DICTIONARY — Maps raw words → (normalized_unit, unit_type)
-#
-# Why normalize? "metres", "meter", "mtr" should all become "meter"
-# so downstream code doesn't need to handle every spelling variant.
+# 2. LOAD UNIT DATABASE (now only for normalization)
 # ─────────────────────────────────────────────
 
-UNIT_MAP = {
-    # Length
-    "meter": ("meter", "length"),
-    "meters": ("meter", "length"),
-    "metre": ("meter", "length"),
-    "metres": ("meter", "length"),
-    "km": ("kilometer", "length"),
-    "kms": ("kilometer", "length"),
-    "kilometer": ("kilometer", "length"),
-    "kilometers": ("kilometer", "length"),
-    "kilometre": ("kilometer", "length"),
-    "kilometres": ("kilometer", "length"),
-    "mile": ("mile", "length"),
-    "miles": ("mile", "length"),
-    "cm": ("centimeter", "length"),
-    "centimeter": ("centimeter", "length"),
-    "centimeters": ("centimeter", "length"),
-    "ft": ("foot", "length"),
-    "feet": ("foot", "length"),
-    "foot": ("foot", "length"),
+def _load_units():
+    json_path = Path(__file__).parent.parent / "data" / "units.json"
+    with open(json_path, "r") as f:
+        data = json.load(f)
+    return {e["pattern"].lower(): (e["norm"], e["type"]) for e in data["units"]}
 
-    # Weight / Mass
-    "kg": ("kilogram", "mass"),
-    "kgs": ("kilogram", "mass"),
-    "kilogram": ("kilogram", "mass"),
-    "kilograms": ("kilogram", "mass"),
-    "tonne": ("tonne", "mass"),
-    "tonnes": ("tonne", "mass"),
-    "ton": ("tonne", "mass"),
-    "tons": ("tonne", "mass"),
-    "gram": ("gram", "mass"),
-    "grams": ("gram", "mass"),
-    "pound": ("pound", "mass"),
-    "pounds": ("pound", "mass"),
+UNIT_LOOKUP = _load_units()
+CURRENCY_SYMBOLS = {"$": "dollar", "₹": "rupee", "€": "euro", "£": "pound"}
+SCALE_WORDS = {"million", "billion", "trillion", "thousand", "lakh", "crore"}
 
-    # Scale / Count (very common in factual sentences)
-    "million": ("million", "scale"),
-    "billion": ("billion", "scale"),
-    "trillion": ("trillion", "scale"),
-    "thousand": ("thousand", "scale"),
-    "lakh": ("lakh", "scale"),
-    "crore": ("crore", "scale"),
+# ─────────────────────────────────────────────
+# 3. LOAD spaCy (reuse from entity_extractor if loaded)
+# ─────────────────────────────────────────────
 
-    # Currency
-    "dollar": ("dollar", "currency"),
-    "dollars": ("dollar", "currency"),
-    "rupee": ("rupee", "currency"),
-    "rupees": ("rupee", "currency"),
-    "euro": ("euro", "currency"),
-    "euros": ("euro", "currency"),
+def _load_model():
+    try:
+        return spacy.load("en_core_web_trf")
+    except OSError:
+        return spacy.load("en_core_web_lg")
 
-    # Percentage
-    "percent": ("percent", "ratio"),
-    "%": ("percent", "ratio"),
-
-    # Time
-    "year": ("year", "time"),
-    "years": ("year", "time"),
-    "month": ("month", "time"),
-    "months": ("month", "time"),
-    "day": ("day", "time"),
-    "days": ("day", "time"),
-    "hour": ("hour", "time"),
-    "hours": ("hour", "time"),
-
-    # Data
-    "gb": ("gigabyte", "data"),
-    "tb": ("terabyte", "data"),
-    "mb": ("megabyte", "data"),
-
-    # Sports
-    "run": ("run", "sports"),
-    "runs": ("run", "sports"),
-    "goal": ("goal", "sports"),
-    "goals": ("goal", "sports"),
-    "point": ("point", "sports"),
-    "points": ("point", "sports"),
-    "wicket": ("wicket", "sports"),
-    "wickets": ("wicket", "sports"),
-
-    # General count
-    "neuron": ("neuron", "count"),
-    "neurons": ("neuron", "count"),
-    "vehicle": ("vehicle", "count"),
-    "vehicles": ("vehicle", "count"),
-    "unit": ("unit", "count"),
-    "units": ("unit", "count"),
-}
-
-# Currency symbols that appear BEFORE the number (e.g., $3.7 trillion, ₹500)
-CURRENCY_SYMBOLS = {
-    "$": "dollar",
-    "₹": "rupee",
-    "€": "euro",
-    "£": "pound",
-}
+nlp = _load_model()
 
 
 # ─────────────────────────────────────────────
-# 3. REGEX PATTERNS
-#
-# This is the core of detection. We use regex to scan text for
-# numeric expressions. Let's break down the main pattern:
-#
-#  (?:[$₹€£])?         → optional currency symbol before number
-#  \d{1,3}(?:,\d{3})* → handles comma-formatted numbers like 1,400,000
-#  (?:\.\d+)?          → optional decimal part
-#  (?:\s+UNIT_WORDS)?  → optional unit word after number (with optional scale)
+# 4. REGEX — finds numbers + currency symbols only
 # ─────────────────────────────────────────────
 
-# All unit words joined into a regex alternation
-_unit_words = "|".join(
-    sorted(UNIT_MAP.keys(), key=len, reverse=True)  # longest first to avoid partial matches
-)
-
-# The master pattern:
-# Captures: (currency_symbol?, number, scale_word?, unit_word?)
-QUANTITY_PATTERN = re.compile(
+NUMBER_PATTERN = re.compile(
     r"""
-    (?P<currency>[$₹€£])?               # optional currency symbol
+    (?P<currency>[$₹€£])?
     (?P<number>
-        \d{1,3}(?:,\d{3})+            # comma-formatted: 1,400,000
-        |\d+                           # OR plain integer of any length: 8849
-        (?:\.\d+)?                     # optional decimal
+        \d{1,3}(?:,\d{3})+     # comma-formatted: 1,400,000
+        |\d+(?:\.\d+)?          # plain integer or decimal
     )
-    (?:                                 # optional unit block
-        \s*
-        (?P<unit>""" + _unit_words + r""")
-        (?:                             # optional secondary scale (e.g., "billion dollars")
-            \s+
-            (?P<unit2>""" + _unit_words + r""")
-        )?
-    )?
     """,
-    re.VERBOSE | re.IGNORECASE,
+    re.VERBOSE
 )
 
 
 # ─────────────────────────────────────────────
-# 4. HELPER — Parse a raw number string like "1,400,000" → 1400000.0
+# 5. FIND UNIT VIA nummod DEPENDENCY
+#
+# In a dependency parse, numbers modify nouns via "nummod".
+# We walk UP from the number token to find what noun it modifies.
+#
+# "183 runs":       runs <--nummod-- 183   → unit = runs
+# "1.4 billion people":
+#    people <--nummod-- billion <--nummod-- 1.4  → unit = people
+# "828 meters":     meters <--nummod-- 828  → unit = meters
+# "$117 billion":   no nummod noun → unit from currency symbol
 # ─────────────────────────────────────────────
 
-def _parse_number(raw: str) -> float:
-    return float(raw.replace(",", ""))
+def _find_unit_from_dep(doc, number_token) -> Optional[tuple[str, str]]:
+    """
+    Walk up the dependency tree from number_token to find its head noun.
+    Preserves scale words (billion/million) as prefix to the unit.
+    """
+    token = number_token
+    scale_prefix = None
+
+    for _ in range(2):
+        head = token.head
+        if head == token:
+            break
+
+        # If head is a scale word, remember it and keep walking
+        if head.lemma_.lower() in SCALE_WORDS:
+            scale_prefix = head.lemma_.lower()
+            token = head
+            continue
+
+        # Found the unit noun
+        if head.pos_ in {"NOUN", "PROPN", "VERB"}:
+            lemma = head.lemma_.lower()
+            if lemma in UNIT_LOOKUP:
+                norm, utype = UNIT_LOOKUP[lemma]
+            else:
+                norm = lemma
+                utype = _infer_type(lemma)
+
+            # Prepend scale if we passed through one
+            if scale_prefix:
+                norm = f"{scale_prefix} {norm}"
+
+            return (norm, utype)
+
+        token = head
+
+    # If we only found a scale word with no noun head, return scale alone
+    if scale_prefix:
+        return UNIT_LOOKUP.get(scale_prefix, (scale_prefix, "scale"))
+
+    return None
+
+def _infer_type(lemma: str) -> str:
+    """
+    Infer unit type from lemma using simple heuristics.
+    This runs only for auto-discovered units not in units.json.
+    """
+    # You can extend this dict freely — it's just for labeling
+    type_hints = {
+        "run": "sports", "goal": "sports", "wicket": "sports",
+        "neuron": "biology", "cell": "biology",
+        "vehicle": "count", "user": "count", "employee": "count",
+        "person": "count", "people": "count",
+    }
+    return type_hints.get(lemma, "count")  # default to "count" for unknowns
 
 
 # ─────────────────────────────────────────────
-# 5. MAIN FUNCTION — detect_quantities(text) → list of QuantitySpan
+# 6. MAIN FUNCTION
 # ─────────────────────────────────────────────
 
 def detect_quantities(text: str) -> list[QuantitySpan]:
     """
-    Scan a sentence and return all detected QuantitySpan objects.
+    Detect quantities using regex for values + spaCy nummod for units.
 
     Example:
-        detect_quantities("India has 1.4 billion people and GDP of $3.7 trillion")
-        → [QuantitySpan(1.4, 'billion', 'scale', '1.4 billion', ...),
-           QuantitySpan(3.7, 'trillion dollar', 'currency', '$3.7 trillion', ...)]
+        "Kohli scored 183 runs" → QuantitySpan(183, "run", "sports", ...)
+        "$117 billion revenue"  → QuantitySpan(117, "billion dollar", "currency", ...)
+        "8849 meters tall"      → QuantitySpan(8849, "meter", "length", ...)
+        "86 billion neurons"    → QuantitySpan(86, "billion neuron", "biology", ...)
     """
+    doc = nlp(text)
     results = []
 
-    for match in QUANTITY_PATTERN.finditer(text):
+    for match in NUMBER_PATTERN.finditer(text):
         raw_number = match.group("number")
+        currency_sym = match.group("currency")
         if not raw_number:
             continue
 
-        value = _parse_number(raw_number)
+        value = float(raw_number.replace(",", ""))
 
-        # Resolve unit: prefer unit2 if it's a currency/mass (more specific)
-        # e.g., "3.7 trillion dollars" → unit="trillion", unit2="dollars"
-        raw_unit = match.group("unit")
-        raw_unit2 = match.group("unit2")
-        currency_sym = match.group("currency")
-
-        # Determine final unit and type
-        if currency_sym:
-            # "$3.7" → unit comes from symbol
-            base_unit = CURRENCY_SYMBOLS[currency_sym]
-            # If there's also a scale word like "trillion", combine them
-            if raw_unit and UNIT_MAP.get(raw_unit.lower(), ("", ""))[1] == "scale":
-                unit = f"{UNIT_MAP[raw_unit.lower()][0]} {base_unit}"
-                unit_type = "currency"
-            else:
-                unit = base_unit
-                unit_type = "currency"
-        elif raw_unit:
-            unit_info = UNIT_MAP.get(raw_unit.lower())
-            if unit_info:
-                unit, unit_type = unit_info
-                # If there's a second unit (e.g., "billion neurons" → scale+count)
-                if raw_unit2:
-                    unit2_info = UNIT_MAP.get(raw_unit2.lower())
-                    if unit2_info:
-                        unit = f"{unit} {unit2_info[0]}"
-            else:
-                unit, unit_type = raw_unit, "unknown"
-        else:
-            unit, unit_type = None, None
-
-        # Only include matches that have a unit OR a meaningful number
-        # (skip bare numbers like years "2023" that have no unit context)
-        if unit is None and value < 1000:
+        # Skip standalone years
+        if 1800 <= value <= 2100 and not currency_sym:
             continue
 
-        raw_text = match.group(0).strip()
-        # Include the currency symbol in raw_text if present
-        start = match.start()
+        # Find the corresponding spaCy token
+        num_token = None
+        for token in doc:
+            if token.idx == match.start("number"):
+                num_token = token
+                break
+
+        if num_token is None:
+            continue
+
+        # Resolve unit
         if currency_sym:
-            raw_text = currency_sym + raw_text.lstrip()
+            base_unit = CURRENCY_SYMBOLS[currency_sym]
+            # Check if next word is a scale (e.g., "$117 billion")
+            scale = None
+            for token in doc:
+                if token.idx == match.end() + 1 and token.lemma_.lower() in SCALE_WORDS:
+                    scale = token.lemma_.lower()
+                    break
+            unit = f"{scale} {base_unit}" if scale else base_unit
+            unit_type = "currency"
+        else:
+            # Use nummod dependency to find unit
+            dep_result = _find_unit_from_dep(doc, num_token)
+            if dep_result:
+                unit, unit_type = dep_result
+            else:
+                # Last resort: check if next token is a known unit
+                next_tokens = [t for t in doc if t.idx > num_token.idx]
+                if next_tokens and next_tokens[0].lemma_.lower() in UNIT_LOOKUP:
+                    unit, unit_type = UNIT_LOOKUP[next_tokens[0].lemma_.lower()]
+                else:
+                    continue  # skip bare numbers
+
+        # Build clean raw_text
+        # For currency, raw_text should be symbol + number + scale only (not repeat "dollar")
+        if currency_sym:
+            scale_word = unit.split()[0] if unit and unit.split()[0] in SCALE_WORDS else ""
+            raw_text = f"{currency_sym}{raw_number} {scale_word}".strip()
+        else:
+            raw_text = f"{raw_number} {unit}".strip()
 
         results.append(QuantitySpan(
             value=value,
             unit=unit,
             unit_type=unit_type,
             raw_text=raw_text,
-            char_start=start,
+            char_start=match.start(),
             char_end=match.end(),
         ))
 

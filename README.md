@@ -1,47 +1,120 @@
 # QuantEx — Quantity Extractor from Text
 
-A structured information extraction pipeline that identifies and links **quantities** to their associated **entities** and **context** from raw text.
+A structured information extraction pipeline that identifies and links
+**quantities** to their associated **entities** and **context** from raw text.
 
-## Example
-Input:
-> "India has a population of 1.4 billion people and a GDP of $3.7 trillion."
-
-Output:
-| Entity | Quantity | Unit    | Context     |
-|--------|----------|---------|-------------|
-| India  | 1.4      | billion | population  |
-| India  | 3.7      | trillion dollars | GDP |
-
-## Pipeline
-1. **Quantity Detection** — regex + spaCy to find numeric expressions
-2. **Entity Extraction** — NER + dependency parsing
-3. **Entity-Quantity Linking** — dependency tree traversal
-4. **Context Extraction** — surrounding predicate/noun context
-
-## Setup
-pip install -r requirements.txt
-python -m spacy download en_core_web_trf
-
-## Usage
-python demo.py
-
-## Motivation
-Inspired by [QuTE (SIGMOD 2021)](https://dl.acm.org/doi/10.1145/3448016.3452791) and contextualized quantity fact extraction work by Dr. Koninika Pal et al.
-```
+Inspired by [QuTE (SIGMOD 2021)](https://dl.acm.org/doi/10.1145/3448016.3452791)
+and contextualized quantity fact extraction work by Dr. Koninika Pal et al.
 
 ---
 
-### Step 5 — Fill `data/sample_sentences.txt`
+## Example
 
-Paste this test data we'll use throughout:
+**Input:**
+> "Apple reported revenue of $117 billion in Q1 2024."
+
+**Output:**
+| Entity | Label | Value  | Unit          | Context  |
+|--------|-------|--------|---------------|----------|
+| Apple  | ORG   | 117.0  | billion dollar| report   |
+
+---
+
+## Pipeline Architecture
 ```
-India has a population of 1.4 billion people.
-Virat Kohli scored 183 runs against Pakistan in a test match.
-The Burj Khalifa stands at 828 meters tall.
-Apple reported revenue of $117 billion in Q1 2024.
-A blue whale can weigh up to 200 tonnes.
-The Amazon River stretches approximately 6400 kilometers.
-Tesla delivered 1.8 million vehicles in 2023.
-Mount Everest is 8849 meters above sea level.
-India imports approximately 85 percent of its crude oil requirements.
-The human brain contains about 86 billion neurons.
+Raw Text
+    ↓
+[Quantity Detector]   — regex + spaCy nummod → finds numeric expressions
+    ↓
+[Entity Extractor]    — spaCy NER + dependency parsing → finds named entities
+    ↓
+[Linker]              — dependency tree path → links quantity to entity
+    ↓
+[Context Extractor]   — LCA in dep tree → finds governing predicate
+    ↓
+QuantExResult(entity, value, unit, context)
+```
+
+### Key Design Decisions
+
+- **No hardcoded unit lists** — spaCy's `nummod` dependency auto-discovers
+  any unit noun from sentence structure
+- **units.json for normalization only** — maps surface forms to canonical
+  forms (e.g. "metres" → "meter")
+- **Two linking strategies** — dependency tree path (primary) with
+  character distance fallback
+- **Four context strategies** — LCA verb/noun → walk from quantity →
+  walk from entity
+
+---
+
+## Setup
+```bash
+pip install -r requirements.txt
+python -m spacy download en_core_web_trf
+pip install -e .
+```
+
+## Usage
+```python
+from quantex.pipeline import run_pipeline
+
+results = run_pipeline("Virat Kohli scored 183 runs against Pakistan.")
+for r in results:
+    print(r)
+# [PERSON] Virat Kohli → 183.0 run | context: 'score' | via dep_tree
+```
+
+## Run Demo
+```bash
+python demo.py
+```
+
+Outputs results to terminal and exports `data/output.csv`.
+
+---
+
+## Results
+
+| Sentence | Entity | Value | Unit | Context |
+|---|---|---|---|---|
+| Kohli scored 183 runs | Virat Kohli (PERSON) | 183.0 | run | score |
+| Burj Khalifa 828 meters | The Burj Khalifa (FAC) | 828.0 | meter | N/A |
+| Apple $117 billion | Apple (ORG) | 117.0 | billion dollar | report |
+| India 85 percent imports | India (GPE) | 85.0 | percent | import |
+| Tesla 1.8M vehicles | Tesla (ORG) | 1.8 | million vehicle | deliver |
+| brain 86B neurons | brain (SUBJECT) | 86.0 | billion neuron | contain |
+| Mount Everest 8849m | Mount Everest (LOC) | 8849.0 | meter | N/A |
+| India 1.4B people | India (GPE) | 1.4 | billion person | population |
+
+---
+
+## Known Limitations
+
+- Copular sentences ("X is Y meters") return `N/A` context — no
+  meaningful predicate exists beyond "is"
+- Multi-quantity sentences link all quantities to the closest entity
+- Coreference not resolved ("It delivered 1.8M vehicles" → entity unknown)
+
+---
+
+## Project Structure
+```
+quantex/
+├── quantex/
+│   ├── quantity_detector.py   # Phase 1 — find numeric expressions
+│   ├── entity_extractor.py    # Phase 2 — find named entities
+│   ├── linker.py              # Phase 3 — link quantity to entity
+│   ├── context_extractor.py   # Phase 4 — extract governing predicate
+│   └── pipeline.py            # Entry point — orchestrates all modules
+├── data/
+│   ├── units.json             # Unit normalization database
+│   └── output.csv             # Generated by demo.py
+├── tests/
+│   ├── test_quantity_detector.py
+│   ├── test_entity_extractor.py
+│   ├── test_linker.py
+│   └── test_pipeline.py
+├── demo.py
+└── requirements.txt
+```

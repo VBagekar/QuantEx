@@ -1,0 +1,16 @@
+sentence,entity,entity_label,value,unit,unit_type,context,raw_quantity,link_method
+Virat Kohli scored 183 runs against Pakistan in a test match.,Virat Kohli,PERSON,183.0,run,sports,score,183 run,dep_tree
+Rohit Sharma hit 264 runs in a single ODI innings.,Rohit Sharma,PERSON,264.0,run,sports,hit,264 run,dep_tree
+Neeraj Chopra threw the javelin 87.58 meters to win gold.,Neeraj Chopra,PERSON,87.58,meter,length,javelin,87.58 meter,dep_tree
+Mount Everest is 8849 meters above sea level.,Mount Everest,LOC,8849.0,meter,length,N/A,8849 meter,dep_tree
+The Amazon River stretches approximately 6400 kilometers.,The Amazon River,LOC,6400.0,kilometer,length,stretch,6400 kilometer,dep_tree
+The Sahara Desert covers about 9.2 million square kilometers.,The Sahara Desert,LOC,9.2,million kilometer,length,cover,9.2 million kilometer,dep_tree
+Apple reported revenue of $117 billion in Q1 2024.,Apple,ORG,117.0,billion dollar,currency,report,$117 billion,dep_tree
+Tesla delivered 1.8 million vehicles in 2023.,Tesla,ORG,1.8,million vehicle,count,deliver,1.8 million vehicle,dep_tree
+Microsoft acquired Activision Blizzard for $68.7 billion.,Microsoft,ORG,68.7,billion dollar,currency,acquire,$68.7 billion,dep_tree
+The human brain contains about 86 billion neurons.,brain,SUBJECT,86.0,billion neuron,biology,contain,86 billion neuron,dep_tree
+Light travels at approximately 300000 kilometers per second.,Light,SUBJECT,300000.0,kilometer,length,travel,300000 kilometer,dep_tree
+The Earth is about 150 million kilometers from the Sun.,Earth,LOC,150.0,million kilometer,length,N/A,150 million kilometer,dep_tree
+India imports approximately 85 percent of its crude oil.,India,GPE,85.0,percent,ratio,import,85 percent,dep_tree
+India has a population of 1.4 billion people.,India,GPE,1.4,billion person,count,population,1.4 billion person,dep_tree
+The US national debt exceeds $33 trillion.,debt,SUBJECT,33.0,trillion dollar,currency,exceed,$33 trillion,dep_tree
